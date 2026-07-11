@@ -9,8 +9,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Construction Startup Directory Chatbot")
-st.caption("Ask natural-language questions about construction tech startups.")
+st.title("BETA ConTech Directory")
+st.caption("Search for your ConTech provider")
 
 CSV_PATH = "data/startups.csv"
 MODEL_NAME = "all-MiniLM-L6-v2"

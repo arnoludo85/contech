@@ -326,5 +326,5 @@ if prompt:
 
     with st.chat_message("assistant"):
         st.write(reply)
-         if table is not None and len(table) > 0:
-                    st.dataframe(table,use_container_width=True,hide_index=True)
+        if table is not None and len(table) > 0:
+            st.dataframe(table,use_container_width=True,hide_index=True)

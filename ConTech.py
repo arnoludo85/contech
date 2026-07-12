@@ -109,14 +109,16 @@ def detect_location(prompt, location_values):
 
     return None
 
-def detect_domain_key(prompt):
-    q = prompt.lower().strip()
+def detect_domain_keys(prompt):
+    q = prompt.lower()
+
+    matched = []
 
     for key in DOMAIN_RULES:
         if key.lower() in q:
-            return key
+            matched.append(key)
 
-    return None
+    return matched
 
 
 def detect_compare_companies(prompt, df, name_col):
@@ -141,26 +143,46 @@ def detect_compare_companies(prompt, df, name_col):
 def exact_literal_match(series, term):
     return series.astype(str).str.contains(term, case=False, na=False, regex=False)
 
-def apply_domain_rules(df, domain_col, domain_key):
-    if not domain_key or not domain_col:
-        return df
+def contains_literal(series, term):
+    return (
+        series.astype(str)
+              .str.contains(
+                  term,
+                  case=False,
+                  regex=False,
+                  na=False
+              )
+    )
 
-    rules = DOMAIN_RULES.get(domain_key)
-    if not rules:
-        return df
+def apply_domain_rules(df, domain_col, domain_keys):
 
-    domain_text = df[domain_col].astype(str)
+    if not domain_keys:
+        return df
 
     include_mask = pd.Series(False, index=df.index)
-    for term in rules["include"]:
-        include_mask |= domain_text.str.contains(term, case=False, na=False, regex=False)
 
-    out = df[include_mask].copy()
+    for domain in domain_keys:
 
-    for term in rules["exclude"]:
-        out = out[~out[domain_col].astype(str).str.contains(term, case=False, na=False, regex=False)]
+        rules = DOMAIN_RULES.get(domain)
 
-    return out
+        if not rules:
+            continue
+
+        domain_mask = pd.Series(False, index=df.index)
+
+        for term in rules["include"]:
+
+            mask = (
+                contains_literal(df[domain_col], term)
+                | contains_literal(df["Description"], term)
+                | contains_literal(df["search_text"], term)
+            )
+
+            domain_mask |= mask
+
+        include_mask |= domain_mask
+
+    return df[include_mask]
 
 def exact_location_filter(df, location_col, location_value):
     if not location_col or not location_value:
@@ -235,7 +257,7 @@ if prompt:
         st.write(prompt)
 
     intent = detect_intent(prompt)
-    domain_key = detect_domain_key(prompt)
+    domain_keys = detect_domain_keys(prompt)
     
     stage_key = detect_stage(prompt)
     location_value = detect_location(prompt, location_values)
@@ -245,15 +267,15 @@ if prompt:
     filtered = df.copy()
 
 
-    filtered = apply_domain_rules(df, domain_col, domain_key)
+    filtered = apply_domain_rules(df, domain_col, domain_keys)
 
-    if domain_key:
+    if domain_keys:
         filtered = filtered[
-            filtered["Domain"]
+            filtered[domain_col]
                 .astype(str)
                 .str.strip()
                 .str.lower()
-                == domain_key.lower()
+                .isin([d.lower() for d in domain_keys])
         ]
   
     if stage_key:
@@ -288,8 +310,8 @@ if prompt:
         reply = "I couldn't find any matches after applying the strict filters."
 
     elif intent == "count":
-        if domain_key:
-            reply = f"I found {len(filtered)} startups matching {domain_key}."
+        if domain_keys:
+            reply = f"I found {len(filtered)} startups matching {domain_keys}."
         elif location_value:
             reply = f"I found {len(filtered)} startups based in {location_value}."
         else:
@@ -344,7 +366,7 @@ if prompt:
 
     
     else:
-        if domain_key or location_value:
+        if domain_keys or location_value:
             reply = "Here are the matching startups:\n" + "\n".join(
                 f"- {row[name_col]} ({row[domain_col] if domain_col else row[category_col]}{', ' + str(row[stage_col]) if stage_col and pd.notna(row.get(stage_col)) else ''}): {row[desc_col]}"
                 for _, row in filtered.iterrows()

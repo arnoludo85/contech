@@ -194,17 +194,29 @@ def build_embeddings_for_df(df):
     model = load_model()
     return model.encode(df["search_text"].tolist(), convert_to_tensor=True)
 
-def semantic_top_matches(df, query, k=TOP_K):
+def semantic_top_matches(df, query, k=TOP_K, threshold=0.45):
     if df.empty:
         return df.copy()
+
     model = load_model()
     embeddings = build_embeddings_for_df(df)
+
     qvec = model.encode(query, convert_to_tensor=True)
     scores = util.cos_sim(qvec, embeddings)[0]
+
     top_idx = scores.argsort(descending=True)[: min(k, len(df))]
+
     out = df.iloc[top_idx].copy()
     out["score"] = [float(scores[i]) for i in top_idx]
-    return out
+
+    # DEBUG: show scores BEFORE filtering
+    st.write("Raw semantic scores:")
+    st.dataframe(out[[name_col, "score"]])
+
+    # Remove weak matches
+    out = out[out["score"] >= threshold]
+
+    return out.reset_index(drop=True)
 
 def web_search(query, max_results=5):
 
@@ -338,7 +350,7 @@ if prompt:
 
     query_parts.extend(["construction", "startup"])
 
-    web_query = prompt + " contech OR construction technology"
+    web_query = prompt + " contech"
 
     web_results = web_search(web_query)
     st.write("Web query:", web_query)
@@ -462,9 +474,15 @@ if prompt:
                     [c for c in [name_col, category_col, stage_col, location_col, domain_col] if c] + ["Source"]
                 ].copy()
             else:
-                matches = combined
+                matches = semantic_top_matches(combined, prompt, k=TOP_K)
+
+
+            
                 if matches.empty:
-                    reply = "I couldn't find a relevant match in the directory."
+                    reply = "I couldn't find any startups matching your query."
+                    table = None
+
+                    
                 else:
                     lines = []
                     for _, row in matches.iterrows():
@@ -472,7 +490,16 @@ if prompt:
                         stage_part = f", {stage_val}" if stage_val is not None else ""
                         lines.append(f"- {row[name_col]} ({row[domain_col] if domain_col else row[category_col]}{stage_part}): {row[desc_col]}")
                     reply = "Here are the most relevant startups:\n" + "\n".join(lines)
-                    table = matches[[c for c in [name_col, category_col, stage_col, location_col, domain_col] if c]].copy()
+                    table = matches[
+                        [c for c in [
+                            name_col,
+                            category_col,
+                            stage_col,
+                            location_col,
+                            domain_col
+                        ] if c] + ["Source"]
+                    ].copy()
+
 
         st.session_state.messages.append({"role": "assistant", "content": reply})
 

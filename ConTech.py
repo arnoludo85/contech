@@ -110,11 +110,33 @@ def detect_location(prompt, location_values):
     return None
 
 def detect_domain_key(prompt):
-    q = prompt.lower()
+    q = prompt.lower().strip()
+
     for key in DOMAIN_RULES:
-        if key in q:
+        if key.lower() in q:
             return key
+
     return None
+
+
+def detect_compare_companies(prompt, df, name_col):
+    """
+    Find all company names mentioned in the user's prompt.
+    Example:
+        Compare Myrlabs and KenRobotec
+        Myrlabs vs KenRobotec
+        Difference between Ailytics and Invigilio
+    """
+
+    q = prompt.lower()
+
+    companies = []
+
+    for company in df[name_col].dropna():
+        if company.lower() in q:
+            companies.append(company)
+
+    return companies
 
 def exact_literal_match(series, term):
     return series.astype(str).str.contains(term, case=False, na=False, regex=False)
@@ -205,6 +227,8 @@ for msg in st.session_state.messages:
         st.write(msg["content"])
 
 prompt = st.chat_input("Ask a question about the directory...")
+
+    
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -212,6 +236,7 @@ if prompt:
 
     intent = detect_intent(prompt)
     domain_key = detect_domain_key(prompt)
+    
     stage_key = detect_stage(prompt)
     location_value = detect_location(prompt, location_values)
 
@@ -224,22 +249,36 @@ if prompt:
 
     if domain_key:
         filtered = filtered[
-            filtered["Domain"].str.lower() == domain_key.lower()
+            filtered["Domain"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                == domain_key.lower()
         ]
   
     if stage_key:
         filtered = filtered[
-            filtered["Funding Stage"].str.lower() == stage_key.lower()
+            filtered["Funding Stage"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                == stage_key.lower()
         ]
 
 
     if location_value:
+
         filtered = filtered[
-            filtered["Location"].str.lower() == location_value.lower()
+            filtered["Location"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                == location_value.lower()
         ]
 
     
-    st.write(filtered[[name_col, desc_col]])
+    # Debug only
+    # st.write(filtered[[name_col, desc_col]])
 
     reply = ""
     table = None
@@ -270,38 +309,40 @@ if prompt:
             reply = "I could not find a dedicated funding stage column."
             table = filtered[[c for c in [name_col, category_col, stage_col, location_col, domain_col] if c]].copy()
 
-    elif intent == "compare":
-        names = [n.strip() for n in re.split(r"\b(?:vs|versus|compare)\b|,", prompt, flags=re.I) if n.strip()]
-        if len(names) >= 2:
-            a, b = names[0], names[1]
-            ra = semantic_top_matches(df, a, k=1)
-            rb = semantic_top_matches(df, b, k=1)
-            if not ra.empty and not rb.empty:
-                reply = f"Here is a quick comparison of {ra.iloc[0][name_col]} and {rb.iloc[0][name_col]}."
-                table = pd.DataFrame([
-                    {
-                        "name": ra.iloc[0][name_col],
-                        "category": ra.iloc[0][category_col] if category_col else "",
-                        "stage": ra.iloc[0][stage_col] if stage_col else "",
-                        "location": ra.iloc[0][location_col] if location_col else "",
-                        "domain": ra.iloc[0][domain_col] if domain_col else "",
-                        "description": ra.iloc[0][desc_col],
-                    },
-                    {
-                        "name": rb.iloc[0][name_col],
-                        "category": rb.iloc[0][category_col] if category_col else "",
-                        "stage": rb.iloc[0][stage_col] if stage_col else "",
-                        "location": rb.iloc[0][location_col] if location_col else "",
-                        "domain": rb.iloc[0][domain_col] if domain_col else "",
-                        "description": rb.iloc[0][desc_col],
-                    },
-                ])
-            else:
-                reply = "I could not find both companies to compare."
-        else:
-            reply = "Please mention two company names to compare."
-            table = filtered[[c for c in [name_col, category_col, stage_col, location_col, domain_col] if c]].copy()
 
+    elif intent == "compare":
+
+        companies = detect_compare_companies(prompt, df, name_col)
+
+        if len(companies) < 2:
+            reply = "Please mention two company names to compare."
+
+        else:
+
+            comparison = (
+                df[df[name_col].isin(companies)][[
+                    name_col,
+                    domain_col,
+                    stage_col,
+                    desc_col,
+                    location_col,
+                    website_col
+                ]]
+                .set_index(name_col)
+                .T
+            )
+
+            comparison.index.name = "Attribute"
+
+            comparison = comparison.reset_index()
+
+            reply = f"Comparison between {companies[0]} and {companies[1]}."
+
+            table = comparison
+
+           
+
+    
     else:
         if domain_key or location_value:
             reply = "Here are the matching startups:\n" + "\n".join(

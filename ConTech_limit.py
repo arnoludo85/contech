@@ -21,7 +21,6 @@ TOP_K = 5
 RELEVANCE_THRESHOLD = 0.75
 DOMAIN_MATCH_THRESHOLD = 0.84
 
-
 DOMAIN_RULES = {
     "digital": {
         "include": ["digital", "software", "platform", "data", "cloud", "workflow", "automation"],
@@ -74,6 +73,15 @@ DOMAIN_RULES = {
     },
 }
 
+# Funding stage vocabulary
+STAGE_RULES = {
+    "pre-seed": ["pre seed", "pre-seed", "preseed"],
+    "seed": ["seed", "seed round", "seed stage"],
+    "series a": ["series a", "series a round", "series a stage", "series-a"],
+    "series b": ["series b", "series b round", "series b stage", "series-b"],
+    "series c": ["series c", "series c round", "series c stage", "series-c"],
+}
+
 
 @st.cache_data
 def load_data(path):
@@ -109,12 +117,6 @@ def normalize_text(x):
 
 
 def fuzzy_term_in_text(text, term, threshold=DOMAIN_MATCH_THRESHOLD):
-    """
-    Returns True for:
-    - exact substring matches
-    - close matches like 'robotic' vs 'robotics'
-    - slight phrase variations like 'autonomous robot' vs 'autonomous robotics'
-    """
     text_n = normalize_text(text)
     term_n = normalize_text(term)
 
@@ -124,19 +126,16 @@ def fuzzy_term_in_text(text, term, threshold=DOMAIN_MATCH_THRESHOLD):
     if term_n in text_n:
         return True
 
-    # Whole-text similarity
     if SequenceMatcher(None, text_n, term_n).ratio() >= threshold:
         return True
 
     text_tokens = text_n.split()
     term_tokens = term_n.split()
 
-    # Single-word terms: compare against each token
     if len(term_tokens) == 1:
         if any(SequenceMatcher(None, term_n, tok).ratio() >= threshold for tok in text_tokens):
             return True
 
-    # Multi-word terms: compare against sliding windows of nearby lengths
     window_sizes = sorted(set([max(1, len(term_tokens) - 1), len(term_tokens), len(term_tokens) + 1]))
     for window_size in window_sizes:
         if window_size > len(text_tokens):
@@ -160,22 +159,51 @@ def detect_intent(q):
     return "search"
 
 
-def detect_stage(prompt):
-    q = prompt.lower()
+def detect_stage_terms(prompt):
+    """
+    Return all funding stage terms mentioned in the query.
+    Example: "Series A, pre-seed etc." -> ["pre-seed", "series a"]
+    """
+    q = normalize_text(prompt)
+    matched = []
 
-    stage_patterns = {
-        "pre-seed": r"\bpre[- ]seed\b",
-        "seed": r"\bseed\b",
-        "series a": r"\bseries\s*a\b",
-        "series b": r"\bseries\s*b\b",
-        "series c": r"\bseries\s*c\b",
-    }
+    for stage, aliases in STAGE_RULES.items():
+        alias_hit = False
+        for alias in aliases:
+            if normalize_text(alias) in q:
+                alias_hit = True
+                break
+        if alias_hit:
+            matched.append(stage)
 
-    for stage, pattern in stage_patterns.items():
-        if re.search(pattern, q):
-            return stage
+    return matched
 
-    return None
+
+def stage_value_matches(value, stage_terms):
+    """
+    Flexible matching for stage values in the dataset.
+    """
+    if not stage_terms:
+        return False
+
+    value_n = normalize_text(value)
+    if not value_n:
+        return False
+
+    for stage in stage_terms:
+        aliases = STAGE_RULES.get(stage, [stage])
+        for alias in aliases:
+            if normalize_text(alias) in value_n:
+                return True
+
+    return False
+
+
+def filter_by_stage(df, stage_col, stage_terms):
+    if not stage_col or not stage_terms:
+        return df
+    mask = df[stage_col].astype(str).apply(lambda x: stage_value_matches(x, stage_terms))
+    return df[mask]
 
 
 def detect_location(prompt, location_values):
@@ -190,12 +218,6 @@ def detect_location(prompt, location_values):
 
 
 def detect_domain_keys(prompt):
-    """
-    Fuzzy domain detection:
-    - catches typos / near-matches
-    - catches aliases and softer wording
-    - works for queries like 'robotic', 'sustainable', 'autonomous robotics'
-    """
     matched = []
     for key, rules in DOMAIN_RULES.items():
         candidates = [key] + rules.get("include", []) + rules.get("aliases", [])
@@ -222,12 +244,6 @@ def contains_literal(series, term):
 
 
 def apply_domain_rules(df, domain_col, domain_keys):
-    """
-    Keep rows that match any domain's inclusion terms.
-    This is intentionally broader than exact equality so that:
-    - query typos still work via detect_domain_keys()
-    - description wording variations still match
-    """
     if not domain_keys:
         return df
 
@@ -239,14 +255,12 @@ def apply_domain_rules(df, domain_col, domain_keys):
             continue
 
         domain_mask = pd.Series(False, index=df.index)
-
         search_terms = rules["include"] + rules.get("aliases", [])
 
         for term in search_terms:
             mask = (
                 contains_literal(df[domain_col], term) if domain_col else pd.Series(False, index=df.index)
             ) | contains_literal(df["Description"], term) | contains_literal(df["search_text"], term)
-
             domain_mask |= mask
 
         include_mask |= domain_mask
@@ -281,7 +295,7 @@ def semantic_top_matches(df, query, k=TOP_K):
     return out
 
 
-def should_reask_user(intent, filtered_df, prompt, domain_keys, location_value):
+def should_reask_user(intent, filtered_df, prompt, domain_keys, location_value, stage_terms):
     """
     Ask the user to rewrite the query when the search is not strong enough.
     Only applies to normal search queries, not count/compare/stages.
@@ -292,12 +306,14 @@ def should_reask_user(intent, filtered_df, prompt, domain_keys, location_value):
     if filtered_df.empty:
         return True, 0.0, pd.DataFrame()
 
+    # If the user already used a structured filter, do not re-ask.
+    if domain_keys or location_value or stage_terms:
+        matches = semantic_top_matches(filtered_df, prompt, k=TOP_K)
+        best_score = float(matches["score"].max()) if not matches.empty else 0.0
+        return False, best_score, matches
+
     matches = semantic_top_matches(filtered_df, prompt, k=TOP_K)
     best_score = float(matches["score"].max()) if not matches.empty else 0.0
-
-    # If the user already specified a structured filter, let that route handle the response.
-    if domain_keys or location_value:
-        return False, best_score, matches
 
     return best_score < RELEVANCE_THRESHOLD, best_score, matches
 
@@ -354,24 +370,15 @@ if prompt:
 
     intent = detect_intent(prompt)
     domain_keys = detect_domain_keys(prompt)
-    stage_key = detect_stage(prompt)
+    stage_terms = detect_stage_terms(prompt)
     location_value = detect_location(prompt, location_values)
 
     filtered = df.copy()
-    filtered = apply_domain_rules(df, domain_col, domain_keys)
+    filtered = apply_domain_rules(filtered, domain_col, domain_keys)
 
-    # Keep these filters flexible by using the detected column names
-    # IMPORTANT CHANGE:
-    # Do NOT require the domain column to equal the domain keyword exactly.
-    # That made queries like "robotic" or "sustainable" too brittle.
-    if stage_key and stage_col:
-        filtered = filtered[
-            filtered[stage_col]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            == stage_key.lower()
-        ]
+    # Flexible stage matching: supports "Series A", "pre-seed", etc.
+    if stage_terms and stage_col:
+        filtered = filter_by_stage(filtered, stage_col, stage_terms)
 
     if location_value and location_col:
         filtered = filtered[
@@ -391,12 +398,12 @@ if prompt:
         prompt=prompt,
         domain_keys=domain_keys,
         location_value=location_value,
+        stage_terms=stage_terms,
     )
 
     if reask_user:
         reply = (
             "I could not find a strong match in the database. "
-            f"The best relevance score was {best_score:.0%}, which is below the 75% threshold. "
             "Please post your query again with a more relevant and specific question about the startups database "
             "(for example: a company name, funding stage, location, category, or domain)."
         )
@@ -410,6 +417,8 @@ if prompt:
     elif intent == "count":
         if domain_keys:
             reply = f"I found {len(filtered)} startups matching {domain_keys}."
+        elif stage_terms:
+            reply = f"I found {len(filtered)} startups in the requested funding stage(s)."
         elif location_value:
             reply = f"I found {len(filtered)} startups based in {location_value}."
         else:
@@ -455,22 +464,29 @@ if prompt:
             table = comparison
 
     else:
-        if domain_keys or location_value:
+        # If the query includes a funding stage, return stage-matched results directly.
+        if stage_terms:
+            reply = "Here are the startups matching the requested funding stage(s):\n" + "\n".join(
+                f"- {row[name_col]} ({row[stage_col] if stage_col else ''}): {row[desc_col]}"
+                for _, row in filtered.iterrows()
+            )
+            table = filtered[[c for c in [name_col, category_col, stage_col, location_col, domain_col] if c]].copy()
+
+        elif domain_keys or location_value:
             reply = "Here are the matching startups:\n" + "\n".join(
                 f"- {row[name_col]} ({row[domain_col] if domain_col else row[category_col]}"
                 f"{', ' + str(row[stage_col]) if stage_col and pd.notna(row.get(stage_col)) else ''}): {row[desc_col]}"
                 for _, row in filtered.iterrows()
             )
             table = filtered[[c for c in [name_col, category_col, stage_col, location_col, domain_col] if c]].copy()
+
         else:
-            # Only answer if the semantic confidence is high enough
             matches = semantic_top_matches(filtered, prompt, k=TOP_K)
             top_score = float(matches["score"].max()) if not matches.empty else 0.0
 
             if top_score < RELEVANCE_THRESHOLD:
                 reply = (
                     "I couldn't find a strong enough match in the database. "
-                    f"The top relevance score was {top_score:.0%}, below the 75% threshold. "
                     "Please post your query again with a more relevant question about the directory."
                 )
             else:

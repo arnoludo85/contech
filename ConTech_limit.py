@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 st.title("BETA ConTech Directory")
-st.caption("Search for your ideal ConTech vendor")
+st.caption("Search for your ConTech vendor")
 
 CSV_PATH = "data/startups.csv"
 MODEL_NAME = "all-MiniLM-L6-v2"
